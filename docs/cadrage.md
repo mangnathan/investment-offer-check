@@ -4,6 +4,10 @@ Version du 27 novembre 2026. Ce document est commité avant toute ligne de code 
 
 Les sources sont numérotées entre crochets et listées à la fin.
 
+## Modifications
+
+- 28 novembre 2026, avant toute mesure : la décision prévue par le critère d'arrêt 1 est avancée, car l'accès à des documents réels est jugé improbable dans les délais. L'évaluation des documents porte sur des documents fabriqués ; seuls les documents réels deviennent un bonus, mesuré à part s'il en arrive. Le jeu local garde les documents fabriqués à partir de vraies entrées de la liste de l'AMF, et tous les seuils, ceux du jeu local et ceux des deux jeux compris, restent inchangés.
+
 ## Résumé des décisions
 
 1. Le cœur du projet est le niveau 2 : lire ce que le client a reçu, en extraire qui le sollicite, puis vérifier cette entité par du code. Le modèle de langage sert seulement à l'extraction.
@@ -15,7 +19,7 @@ Les sources sont numérotées entre crochets et listées à la fin.
 7. Aucune liste n'est versionnée ni republiée : les données sont téléchargées à l'exécution. Il n'y a pas de branche de données publique en v1, car une liste de domaines datés republierait la liste de l'AMF et exposerait à un risque de diffamation ; seuls des agrégats sont publiés, et la question est rouverte en v2.
 8. La v1 est mesurée sur le test rétrospectif 2026, ouvert une seule fois. Le jeu prospectif issu de la collecte quotidienne est évalué en v2, faute d'effectifs suffisants fin janvier.
 9. Chaque seuil est jugé sur la borne de l'intervalle de confiance à 95 % la moins favorable, pas sur la valeur centrale.
-10. Si moins de 20 documents réels exploitables sont réunis le 18 décembre 2026, l'évaluation bascule sur des documents fictifs seulement, et le rapport le dit.
+10. L'évaluation des documents porte sur des documents fabriqués : les modèles réservés, le contrôle de réalisme et les variantes hostiles en sont le cœur, et le rapport le dit dès son résumé. Les documents réels, s'il en arrive, sont un bonus mesuré à part (décision avancée le 28 novembre 2026, voir « Modifications »).
 11. Les besoins de l'utilisateur sont des hypothèses tirées de sources publiques. Elles sont listées comme telles, avec un plan pour les valider.
 
 ## 1. Besoin
@@ -35,7 +39,7 @@ Il n'existe pas de chiffre officiel récent et fiable qui mesure, chaque année,
 - le parquet de Paris estime le préjudice des escroqueries financières en France à au moins 500 millions d'euros par an, et constate une baisse du nombre de plaintes [3] ;
 - le préjudice moyen observé par l'ACPR sur les trois premiers trimestres 2024 est de 69 000 euros pour les faux livrets d'épargne ; la perte moyenne déclarée à l'AMF, tous thèmes confondus, est de 29 000 euros à fin novembre 2024 [3] ;
 - selon une enquête réalisée pour l'AMF en septembre 2024 auprès de 5 001 personnes, 3,2 % des Français seraient victimes d'escroqueries à l'investissement [3] ;
-- en 2025, l'AMF et l'ACPR ont inscrit 1 351 nouveaux noms sur leurs six listes noires (9 269 noms au 31 décembre 2025), et près de 891 cas d'usurpation d'identité ont été recensés [4].
+- en 2025, l'AMF et l'ACPR ont inscrit 1 351 nouveaux noms sur leurs six listes noires (9 269 noms au 31 décembre 2025) ; le rapport du Pôle commun ajoute : « Près de 891 cas d’usurpation d’identité ont été recensés en 2025 » [4].
 
 Le rapport 2025 de l'Observatoire de la sécurité des moyens de paiement exclut de son périmètre les escroqueries portant sur un produit inexistant, donc les faux placements [5]. Ses chiffres servent ici de contexte sur la fraude au virement, pas de taille du problème : 484,7 millions d'euros de fraude au virement, dont 42 % sur des virements instantanés, et 516 millions d'euros de fraude par manipulation, où le client valide lui-même l'opération [5].
 
@@ -117,7 +121,7 @@ Les domaines existent donc plusieurs mois avant leur inscription, ce qui laisse 
 ### Deux jeux de documents
 
 - Un jeu public : des documents fabriqués sur des modèles, avec des acteurs fictifs, vérifiés contre un petit registre fictif versionné dans les tests.
-- Un jeu local : des documents réels, reçus par des personnes qui ont donné leur accord, et des documents fabriqués sur les mêmes modèles avec de vraies entrées de la liste de l'AMF. Les noms de personnes physiques (la personne qui a reçu le document, le prétendu conseiller) sont retirés avant l'entrée d'un document dans ce jeu, donc avant tout appel au modèle. Il n'est jamais publié ; seuls des agrégats le sont.
+- Un jeu local : des documents fabriqués sur les mêmes modèles avec de vraies entrées de la liste de l'AMF, et, en bonus s'il en arrive, des documents réels reçus par des personnes qui ont donné leur accord. Les noms de personnes physiques (la personne qui a reçu le document, le prétendu conseiller) sont retirés avant l'entrée d'un document dans ce jeu, donc avant tout appel au modèle. Il n'est jamais publié ; seuls des agrégats le sont.
 
 Le marquage « document fabriqué pour test » est retiré avant l'analyse, par une règle ou en le gardant dans les métadonnées, pour que le modèle ne le voie pas.
 
@@ -149,6 +153,7 @@ Cette page traduit chaque règle en contrainte sur le code. Elle n'est pas un av
 - Jeu prospectif : inscriptions postérieures, issues de la collecte quotidienne. Évalué en v2.
 - Usurpations annotées : environ 150 lignes de la liste de l'AMF annotées à la main avec l'acteur imité, selon des règles écrites et commitées avant l'annotation ; environ 100 en mise au point et 50 dans le test rétrospectif. Les 50 usurpations du test sont annotées sans voir aucune sortie de l'outil ni des références simples.
 - Contrôle de réalisme : une vingtaine de courts extraits cités de descriptions de l'AMF, comparés aux modèles de documents.
+- Documents : les seuils sont jugés sur des documents fabriqués (modèles réservés et variantes hostiles). Les documents réels, s'il en arrive, sont mesurés à part et n'entrent dans aucun seuil.
 
 Pour mesurer ce qui n'était pas encore inscrit, la liste est reconstituée à la veille de chaque inscription, en ne gardant que les lignes inscrites avant cette date.
 
@@ -220,7 +225,7 @@ Grille d'évaluation d'une opportunité produit [18].
 
 On suppose que le projet a échoué le 31 janvier 2027. Causes probables, et parade prévue :
 
-- Trop peu de documents réels : bascule sur des documents fictifs (critère d'arrêt 1), annoncée dans le rapport.
+- Pas de documents réels : la décision est prise dès le 28 novembre 2026 ; l'évaluation repose sur des documents fabriqués, et le rapport le dit franchement.
 - Documents fictifs trop faciles, que l'outil réussit sans difficulté : modèles réservés écrits à la main, contrôle de réalisme sur les descriptions de l'AMF, variantes hostiles.
 - Le niveau 1 rate la plupart des cas : c'est attendu ; il est présenté comme un filtre, et son rappel est publié par schéma.
 - La correspondance approximative simple fait aussi bien que l'outil sur les clones : le résultat est publié, et l'apport est recentré sur l'extraction depuis le document (critère 3).
@@ -232,7 +237,7 @@ On suppose que le projet a échoué le 31 janvier 2027. Causes probables, et par
 
 ## 12. Critères d'arrêt ou de pivot
 
-1. Le 18 décembre 2026 : moins de 20 documents réels exploitables (texte, entité qui sollicite identifiable, accord de la personne qui l'a reçu) → l'évaluation porte sur des documents fictifs seulement, et le rapport le dit dès son résumé.
+1. Décision avancée le 28 novembre 2026, avant toute mesure : l'évaluation porte sur des documents fabriqués, et le rapport le dit dès son résumé. Le 18 décembre 2026, les documents réels exploitables réunis (texte, entité qui sollicite identifiable, accord de la personne qui l'a reçu), s'il y en a, forment un bonus mesuré à part ; aucun seuil n'en dépend.
 2. Le 10 janvier 2027, sur la mise au point : si l'extraction par le modèle ne dépasse pas l'extraction par expressions régulières → la v1 garde les expressions régulières, et le modèle passe en v2 sur les documents où il apporte quelque chose.
 3. À la mesure finale : si la borne basse du rappel sur les usurpations pas encore inscrites ne dépasse pas la meilleure référence simple → l'outil est présenté comme une vérification datée et sourcée, sans prétendre détecter les clones mieux qu'une correspondance simple.
 4. À tout moment : si une source passe sous conditions incompatibles (clé payante, interdiction de réutilisation) → arrêt de son usage, documenté, et remplacement ou retrait de la vérification correspondante.
