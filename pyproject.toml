@@ -1,0 +1,50 @@
+[project]
+name = "investment-offer-check"
+version = "0.0.0"
+description = "Vérifier, avant un virement vers un placement, qui sollicite le client."
+readme = "README.md"
+authors = [{ name = "Nathan Mang" }]
+license = "MIT"
+requires-python = ">=3.12"
+# Aucune dépendance d'exécution : la collecte n'utilise que la bibliothèque standard.
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "ruff>=0.13",
+    "mypy>=1.18",
+    "pytest>=8.4",
+    "pre-commit>=4.3",
+]
+
+[build-system]
+requires = ["uv_build>=0.13,<0.14"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E", "W",  # style PEP 8
+    "F",       # erreurs logiques (variables inutilisées, imports manquants)
+    "I",       # ordre des imports
+    "UP",      # syntaxe Python moderne
+    "B",       # pièges courants (arguments mutables par défaut, etc.)
+    "SIM",     # simplifications
+    "N",       # conventions de nommage
+    "S",       # sécurité (bandit) : secrets en dur, appels réseau non maîtrisés...
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
