@@ -88,8 +88,10 @@ def identifier(texte: str, courriel: bool = False) -> Identite:
     hote = normaliser_hote(texte)
     if courriel and (fournisseur := _sur(hote, p.messageries)) is not None:
         return Identite(Genre.MESSAGERIE, fournisseur)
+    if courriel:
+        texte = hote  # une adresse de courriel n'a pas de chemin
     if (plateforme := _sur(hote, p.plateformes_a_chemin)) is not None:
-        chemin = None if courriel else _chemin(texte)
+        chemin = _chemin(texte)
         garde = plateforme in p.chemin_garde
         return Identite(
             Genre.PLATEFORME,
@@ -99,7 +101,7 @@ def identifier(texte: str, courriel: bool = False) -> Identite:
             mention=LIEN_RACCOURCI if plateforme in p.raccourcisseurs else None,
         )
     if _sur(hote, p.hebergeurs) is not None:
-        return Identite(Genre.HEBERGEUR, hote)
+        return Identite(Genre.HEBERGEUR, hote, chemin_retire=_chemin(texte) is not None)
     domaine = liste_des_suffixes().domaine_enregistrable(hote)
     if domaine is None:
         raise NomInvalideError("suffixe public seul", texte)

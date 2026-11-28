@@ -15,7 +15,33 @@ from investment_offer_check.plateformes import (
 
 
 def test_version_des_listes() -> None:
-    assert plateformes().version == "2026-11-28"
+    assert plateformes().version == "2"
+
+
+@pytest.mark.parametrize(
+    ("texte", "attendu"),
+    [
+        (
+            "https://pages.orange.fr/conseil-fictif",
+            Identite(Genre.HEBERGEUR, "pages.orange.fr", chemin_retire=True),
+        ),
+        ("conseil-fictif.free.fr", Identite(Genre.HEBERGEUR, "conseil-fictif.free.fr")),
+        (
+            "http://perso.wanadoo.fr/conseil-fictif/",
+            Identite(Genre.HEBERGEUR, "perso.wanadoo.fr", chemin_retire=True),
+        ),
+    ],
+)
+def test_pages_personnelles_des_fournisseurs_d_acces(texte: str, attendu: Identite) -> None:
+    identite = identifier(texte)
+    assert identite == attendu
+    assert not identite.interrogeable
+
+
+def test_courriel_free_reste_une_messagerie() -> None:
+    assert identifier("conseil.fictif@free.fr", courriel=True) == Identite(
+        Genre.MESSAGERIE, "free.fr"
+    )
 
 
 def test_listes_coherentes() -> None:
@@ -36,7 +62,7 @@ def test_listes_coherentes() -> None:
         ("espace.banque-élysée.fr", Identite(Genre.DOMAINE, "xn--banque-lyse-hbbd.fr")),
         ("conseil-fictif.wixsite.com", Identite(Genre.DOMAINE, "conseil-fictif.wixsite.com")),
         # Catégorie A réservée aux courriels : un site sur orange.fr suit la règle ordinaire.
-        ("https://pages.orange.fr/conseil", Identite(Genre.DOMAINE, "orange.fr")),
+        ("https://boutique.orange.fr/offre", Identite(Genre.DOMAINE, "orange.fr")),
         ("conseil-fictif.wordpress.com", Identite(Genre.HEBERGEUR, "conseil-fictif.wordpress.com")),
         (
             "https://sites.google.com/view/placement-fictif?x=1",
