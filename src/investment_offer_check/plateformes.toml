@@ -1,0 +1,37 @@
+# Plateformes partagées : un nom sur ces hôtes ne désigne pas l'entité elle-même.
+# Aucun appel RDAP ni crt.sh n'est fait sur ces noms ; ils sont comptés dans le bilan.
+# Toute modification change la version, enregistrée avec chaque instantané filtré.
+version = "2026-11-28"
+
+# A. Messageries publiques, pour les adresses de courriel seulement : seul le fournisseur est
+# gardé, jamais la partie avant le @. Un site sur l'un de ces domaines suit la règle ordinaire.
+# Vus dans la liste de l'AMF (inscriptions jusqu'à fin 2025) : gmail.com, protonmail.com,
+# pm.me, mail.com, europe.com, consultant.com, dr.com. Les autres sont courants en France.
+messageries = [
+    "aol.com", "consultant.com", "dr.com", "europe.com", "free.fr", "gmail.com", "gmx.com",
+    "gmx.fr", "googlemail.com", "hotmail.com", "hotmail.fr", "icloud.com", "laposte.net",
+    "live.com", "live.fr", "mail.com", "me.com", "orange.fr", "outlook.com", "outlook.fr",
+    "pm.me", "proton.me", "protonmail.com", "sfr.fr", "wanadoo.fr", "yahoo.com", "yahoo.fr",
+    "yandex.com", "zoho.com",
+]
+
+# B. Plateformes à chemin. Un chemin peut désigner une personne (numéro, profil, agenda) :
+# il n'est gardé que pour les hôtes de « chemin_garde » ; ailleurs il est retiré et compté.
+plateformes_a_chemin = [
+    "bit.ly", "calendly.com", "chat.whatsapp.com", "docs.google.com", "drive.google.com",
+    "facebook.com", "fb.me", "forms.gle", "instagram.com", "linkedin.com", "linktr.ee",
+    "medium.com", "sites.google.com", "t.me", "telegram.me", "tiktok.com", "twitter.com",
+    "wa.me", "x.com", "youtu.be", "youtube.com",
+]
+chemin_garde = [
+    "bit.ly", "docs.google.com", "drive.google.com", "forms.gle", "sites.google.com",
+]
+# Liens raccourcis : jamais suivis, la cible reste inconnue.
+raccourcisseurs = ["bit.ly", "forms.gle"]
+
+# C. Hébergeurs à sous-domaine absents de la liste publique des suffixes : l'hôte complet
+# identifie la page, mais interroger le domaine de l'hébergeur n'apprend rien sur l'entité.
+hebergeurs = [
+    "formaloo.co", "godaddysites.com", "jimdofree.com", "mystrikingly.com", "weebly.com",
+    "wordpress.com",
+]
