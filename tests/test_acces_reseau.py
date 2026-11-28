@@ -6,7 +6,11 @@ Aucun autre module de src/ n'importe de bibliothèque réseau ni n'ouvre de conn
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
+from urllib.parse import urlsplit
+
+from investment_offer_check.reseau import HOTES_FIXES
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "investment_offer_check"
 CLIENT = SRC / "reseau.py"
@@ -71,3 +75,31 @@ def test_le_controle_detecte_les_ecarts(tmp_path: Path) -> None:
 
 def test_le_client_reste_le_seul_point_d_acces() -> None:
     assert "HTTPSConnection" in ecarts(CLIENT)
+
+
+def adresses_ecrites(chemin: Path) -> list[str]:
+    """Chaînes du code qui commencent par un schéma d'adresse (http, https, ftp...)."""
+    arbre = ast.parse(chemin.read_text(encoding="utf-8"), filename=str(chemin))
+    return [
+        n.value
+        for n in ast.walk(arbre)
+        if isinstance(n, ast.Constant)
+        and isinstance(n.value, str)
+        and re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", n.value)
+    ]
+
+
+def test_chaque_adresse_ecrite_vise_un_hote_de_la_liste_fermee() -> None:
+    hors_liste = {
+        str(f.relative_to(SRC)): adresse
+        for f in sorted(SRC.rglob("*.py"))
+        for adresse in adresses_ecrites(f)
+        if urlsplit(adresse).scheme != "https" or urlsplit(adresse).hostname not in HOTES_FIXES
+    }
+    assert hors_liste == {}
+
+
+def test_le_controle_des_adresses_detecte_un_hote_hors_liste(tmp_path: Path) -> None:
+    fautif = tmp_path / "fautif.py"
+    fautif.write_text('URL = "https://site-de-l-entite.test/"\nX = "http://crt.sh/"\n', "utf-8")
+    assert adresses_ecrites(fautif) == ["https://site-de-l-entite.test/", "http://crt.sh/"]

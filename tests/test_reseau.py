@@ -11,10 +11,14 @@ import pytest
 
 from investment_offer_check import reseau
 from investment_offer_check.reseau import (
+    HOTES_FIXES,
     USER_AGENT,
     AdresseRefuseeError,
+    Autorisation,
     Client,
+    HoteRefuseError,
     PlafondAtteintError,
+    RedirectionRefuseeError,
     RefusDeQuotaError,
     Reponse,
     ReponseTropGrosseError,
@@ -29,7 +33,9 @@ class TransportSimule:
         self.statuts = statuts or []
         self.appels: list[tuple[str, dict[str, str], float]] = []
 
-    def __call__(self, url: str, entetes: Mapping[str, str], delai: float) -> Reponse:
+    def __call__(
+        self, url: str, entetes: Mapping[str, str], delai: float, autorise: Autorisation
+    ) -> Reponse:
         self.appels.append((url, dict(entetes), delai))
         statut = self.statuts.pop(0) if self.statuts else 200
         return Reponse(statut, b"{}")
@@ -54,6 +60,7 @@ def client(transport: TransportSimule, horloge: Horloge | None = None, **kw: Any
         plafonds=kw.pop("plafonds", {"rdap": 3, "crt": 3}),
         pauses=kw.pop("pauses", {"rdap": 0.0, "crt": 15.0}),
         transport=transport,
+        hotes_fixes=kw.pop("hotes_fixes", frozenset({"exemple.test", "statique.test"})),
         attendre=h.attendre,
         horloge=h.maintenant,
         **kw,
@@ -187,7 +194,7 @@ def connexion(monkeypatch: pytest.MonkeyPatch) -> type[ConnexionSimulee]:
 
 def test_tls_verifie_par_defaut_et_delai_transmis(connexion: type[ConnexionSimulee]) -> None:
     connexion.reponses = [(200, {}, b"ok")]
-    rep = transport_https("https://exemple.test/a?b=1", {"User-Agent": USER_AGENT}, 12.0)
+    rep = transport_https("https://exemple.test/a?b=1", {"User-Agent": USER_AGENT}, 12.0, _tout)
     assert rep == Reponse(200, b"ok")
     cree = connexion.creees[0]
     assert cree["hote"] == "exemple.test"
@@ -201,21 +208,21 @@ def test_tls_verifie_par_defaut_et_delai_transmis(connexion: type[ConnexionSimul
 
 def test_redirection_suivie_en_https(connexion: type[ConnexionSimulee]) -> None:
     connexion.reponses = [(302, {"Location": "https://statique.test/f.csv"}, b""), (200, {}, b"x")]
-    assert transport_https("https://exemple.test/r", {}, 5.0) == Reponse(200, b"x")
+    assert transport_https("https://exemple.test/r", {}, 5.0, _tout) == Reponse(200, b"x")
     assert connexion.creees[1]["hote"] == "statique.test"
 
 
 def test_redirection_vers_http_refusee(connexion: type[ConnexionSimulee]) -> None:
     connexion.reponses = [(301, {"Location": "http://statique.test/f.csv"}, b"")]
     with pytest.raises(AdresseRefuseeError):
-        transport_https("https://exemple.test/r", {}, 5.0)
+        transport_https("https://exemple.test/r", {}, 5.0, _tout)
     assert len(connexion.creees) == 1
 
 
 def test_trop_de_redirections(connexion: type[ConnexionSimulee]) -> None:
     connexion.reponses = [(302, {"Location": "/boucle"}, b"")] * (reseau.REDIRECTIONS_MAX + 1)
     with pytest.raises(AdresseRefuseeError):
-        transport_https("https://exemple.test/boucle", {}, 5.0)
+        transport_https("https://exemple.test/boucle", {}, 5.0, _tout)
 
 
 def test_reponse_trop_grosse(
@@ -224,4 +231,71 @@ def test_reponse_trop_grosse(
     monkeypatch.setattr(reseau, "TAILLE_MAX_OCTETS", 4)
     connexion.reponses = [(200, {}, b"12345")]
     with pytest.raises(ReponseTropGrosseError):
-        transport_https("https://exemple.test/gros", {}, 5.0)
+        transport_https("https://exemple.test/gros", {}, 5.0, _tout)
+
+
+def _tout(cible: str) -> bool:
+    return True
+
+
+def test_liste_fermee_des_hotes_figee() -> None:
+    assert (
+        frozenset({"www.data.gouv.fr", "amf.s3.sbg.io.cloud.ovh.net", "data.iana.org", "crt.sh"})
+        == HOTES_FIXES
+    )
+
+
+def test_hote_hors_liste_refuse_sans_appel() -> None:
+    transport = TransportSimule()
+    with pytest.raises(HoteRefuseError):
+        client(transport).get("rdap", "https://site-de-l-entite.test/")
+    assert transport.appels == []
+    assert client(transport).appels == {}
+
+
+def test_serveur_rdap_accepte_seulement_s_il_est_declare() -> None:
+    transport = TransportSimule()
+    c = client(transport)
+    with pytest.raises(HoteRefuseError):
+        c.get("rdap", "https://rdap.registre-fictif.test/domain/x.test")
+    c.declarer_serveurs_rdap(["https://rdap.registre-fictif.test/"])
+    c.get("rdap", "https://rdap.registre-fictif.test/domain/x.test")
+    assert len(transport.appels) == 1
+
+
+def test_jamais_le_domaine_recherche_ni_ses_sous_domaines() -> None:
+    transport = TransportSimule()
+    c = client(transport)
+    c.declarer_serveurs_rdap(["https://rdap.conseil-fictif.test/"])
+    with pytest.raises(HoteRefuseError):
+        c.get("rdap", "https://rdap.conseil-fictif.test/x", domaine_recherche="conseil-fictif.test")
+    with pytest.raises(HoteRefuseError):
+        c.get("crt", "https://exemple.test/x", domaine_recherche="exemple.test")
+    assert transport.appels == []
+
+
+def test_redirection_vers_hote_non_autorise_refusee_et_comptee(
+    connexion: type[ConnexionSimulee],
+) -> None:
+    connexion.reponses = [(302, {"Location": "https://ailleurs.test/x"}, b"")]
+    c = Client(
+        plafonds={"rdap": 3},
+        pauses={"rdap": 0.0},
+        hotes_fixes=frozenset(),
+        attendre=lambda _: None,
+    )
+    c.declarer_serveurs_rdap(["https://rdap.registre-fictif.test/"])
+    with pytest.raises(RedirectionRefuseeError):
+        c.get("rdap", "https://rdap.registre-fictif.test/domain/x.test")
+    assert c.redirections_refusees == {"rdap": 1}
+    assert len(connexion.creees) == 1  # la cible de la redirection n'est jamais contactée
+
+
+def test_redirection_vers_le_domaine_recherche_refusee(connexion: type[ConnexionSimulee]) -> None:
+    connexion.reponses = [(302, {"Location": "https://www.conseil-fictif.test/"}, b"")]
+    c = Client(plafonds={"crt": 1}, pauses={"crt": 0.0}, hotes_fixes=frozenset({"crt.sh"}))
+    with pytest.raises(RedirectionRefuseeError):
+        c.get(
+            "crt", "https://crt.sh/?q=conseil-fictif.test", domaine_recherche="conseil-fictif.test"
+        )
+    assert len(connexion.creees) == 1
