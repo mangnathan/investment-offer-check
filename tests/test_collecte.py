@@ -1,0 +1,190 @@
+"""Commandes de collecte, de bout en bout sur des réponses fictives, sans aucun appel réseau."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from collections.abc import Mapping
+from pathlib import Path
+
+import pytest
+
+from investment_offer_check import collecte
+from investment_offer_check.liste_amf import RESSOURCE, URL_FICHIER, URL_JEU
+from investment_offer_check.releves import URL_AMORCAGE
+from investment_offer_check.reseau import Autorisation, Client, Reponse
+
+SERVEUR = "https://rdap.registre-fictif.test/v1/"
+PERSONNE = "Jeanne Fictive"
+CSV = (
+    b"nom;categorie;date_inscription\n"
+    b"ancien-fictif.test;Forex;2026-06-01\n"
+    b"exclu-fictif.test;Forex;2026-07-01\n"
+    b"nouveau-fictif.test;Usurpation;2026-12-01\n"
+    b"contact@nouveau-fictif.test;Usurpation;2026-12-01\n"
+    b"conseiller@gmail.com;Forex;2026-12-02\n"
+    b"autre-fictif.test;Forex;2026-12-02\n"
+)
+
+
+def _rdap(date: str) -> Reponse:
+    document = {
+        "events": [{"eventAction": "registration", "eventDate": date}],
+        "entities": [
+            {"roles": ["registrant"], "vcardArray": ["vcard", [["fn", {}, "text", PERSONNE]]]},
+            {
+                "roles": ["registrar"],
+                "vcardArray": ["vcard", [["fn", {}, "text", "Bureau Fictif"]]],
+            },
+        ],
+    }
+    return Reponse(200, json.dumps(document).encode())
+
+
+class Simule:
+    def __init__(self, reponses: dict[str, Reponse]) -> None:
+        self.reponses = reponses
+        self.urls: list[str] = []
+
+    def __call__(
+        self, url: str, entetes: Mapping[str, str], delai: float, autorise: Autorisation
+    ) -> Reponse:
+        self.urls.append(url)
+        return self.reponses.get(url, Reponse(404, b""))
+
+
+def _reponses(last_modified: str = "2026-12-02T07:30:02+00:00") -> dict[str, Reponse]:
+    jeu = {
+        "resources": [
+            {
+                "id": RESSOURCE,
+                "last_modified": last_modified,
+                "extras": {
+                    "analysis:checksum": hashlib.sha1(CSV, usedforsecurity=False).hexdigest()
+                },
+            }
+        ]
+    }
+    amorcage = {"services": [[["test"], [SERVEUR]]]}
+    reponses = {
+        URL_JEU: Reponse(200, json.dumps(jeu).encode()),
+        URL_FICHIER: Reponse(200, CSV),
+        URL_AMORCAGE: Reponse(200, json.dumps(amorcage).encode()),
+    }
+    for domaine in (
+        "ancien-fictif.test",
+        "exclu-fictif.test",
+        "nouveau-fictif.test",
+        "autre-fictif.test",
+    ):
+        reponses[SERVEUR + "domain/" + domaine] = _rdap("2026-05-01T00:00:00Z")
+        reponses[f"https://crt.sh/?q={domaine}&output=json"] = Reponse(
+            200, b'[{"not_before": "2026-05-01T10:00:00", "issuer_name": "O=Autorite Fictive"}]'
+        )
+    return reponses
+
+
+def _client(reponses: dict[str, Reponse], rdap: int = 30) -> tuple[Client, Simule]:
+    simule = Simule(reponses)
+    plafonds = collecte.PLAFONDS_QUOTIDIENS | {"rdap": rdap}
+    pauses = dict.fromkeys(collecte.PAUSES, 0.0)
+    return Client(plafonds=plafonds, pauses=pauses, transport=simule), simule
+
+
+def _releves(dossier: Path) -> list[dict[str, object]]:
+    texte = (dossier / "releves.jsonl").read_text("utf-8")
+    return [json.loads(ligne) for ligne in texte.splitlines()]
+
+
+def test_premiere_collecte(tmp_path: Path) -> None:
+    client, simule = _client(_reponses())
+    assert collecte.quotidienne(tmp_path, client, "2026-12-02") == 0
+    assert (tmp_path / "instantanes" / "2026-12-02.json").exists()
+    domaines = [r["domaine"] for r in _releves(tmp_path)]
+    assert domaines == ["nouveau-fictif.test", "autre-fictif.test"]  # inscrits depuis le 28/11
+    bilan = json.loads((tmp_path / "bilans" / "2026-12-02.json").read_text("utf-8"))
+    assert bilan["fichier_inchange"] is False
+    assert bilan["ecart_somme_de_controle"] is False
+    assert bilan["releves"] == {"a_relever": 2, "releves": 2, "echecs": 0, "arret": None}
+    assert URL_FICHIER in simule.urls
+
+
+def test_jour_sans_mise_a_jour(tmp_path: Path) -> None:
+    collecte.quotidienne(tmp_path, _client(_reponses())[0], "2026-12-02")
+    client, simule = _client(_reponses())
+    assert collecte.quotidienne(tmp_path, client, "2026-12-03") == 0
+    bilan = json.loads((tmp_path / "bilans" / "2026-12-03.json").read_text("utf-8"))
+    assert bilan["fichier_inchange"] is True
+    assert simule.urls == [URL_JEU]  # ni téléchargement, ni relevé refait
+    assert not (tmp_path / "instantanes" / "2026-12-03.json").exists()
+
+
+def test_plafond_atteint_reprise_le_lendemain(tmp_path: Path) -> None:
+    client, _ = _client(_reponses(), rdap=1)
+    collecte.quotidienne(tmp_path, client, "2026-12-02")
+    assert [r["domaine"] for r in _releves(tmp_path)] == ["nouveau-fictif.test"]
+    client, _ = _client(_reponses("2026-12-03T07:30:02+00:00"))
+    collecte.quotidienne(tmp_path, client, "2026-12-03")
+    assert [r["domaine"] for r in _releves(tmp_path)] == [
+        "nouveau-fictif.test",
+        "autre-fictif.test",
+    ]
+
+
+def test_refus_de_quota_arrete_et_le_signale(tmp_path: Path) -> None:
+    reponses = _reponses()
+    reponses[SERVEUR + "domain/nouveau-fictif.test"] = Reponse(429, b"")
+    assert collecte.quotidienne(tmp_path, _client(reponses)[0], "2026-12-02") == 2
+    bilan = json.loads((tmp_path / "bilans" / "2026-12-02.json").read_text("utf-8"))
+    assert bilan["releves"]["arret"] == "refus de quota"
+    assert not (tmp_path / "releves.jsonl").exists()
+
+
+def test_aucune_donnee_personnelle_dans_les_fichiers(tmp_path: Path) -> None:
+    collecte.quotidienne(tmp_path, _client(_reponses())[0], "2026-12-02")
+    for fichier in tmp_path.rglob("*"):
+        if fichier.is_file():
+            texte = fichier.read_text("utf-8")
+            assert PERSONNE not in texte
+            assert "conseiller@" not in texte
+
+
+@pytest.fixture
+def exclus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    fichier = tmp_path / "exclus.txt"
+    fichier.write_bytes(b"exclu-fictif.test\n")
+    monkeypatch.setattr(
+        collecte, "EMPREINTE_EXCLUS", hashlib.sha256(b"exclu-fictif.test\n").hexdigest()
+    )
+    return fichier
+
+
+def test_rattrapage_sans_les_domaines_exclus_et_avec_reprise(tmp_path: Path, exclus: Path) -> None:
+    liste = tmp_path / "liste.csv"
+    liste.write_bytes(CSV)
+    donnees = tmp_path / "donnees"
+    client, _ = _client(_reponses())
+    code = collecte.rattrapage(
+        donnees, client, liste, exclus, "2026-01-01", "2026-11-27", "2026-12-04"
+    )
+    assert code == 0
+    assert [r["domaine"] for r in _releves(donnees)] == ["ancien-fictif.test"]
+    bilan = json.loads((donnees / "bilans" / "rattrapage-2026-12-04.json").read_text("utf-8"))
+    assert set(bilan) == {
+        "date",
+        "periode",
+        "domaines_exclus",
+        "releves",
+        "appels",
+        "redirections_refusees",
+    }
+    client, simule = _client(_reponses())
+    collecte.rattrapage(donnees, client, liste, exclus, "2026-01-01", "2026-11-27", "2026-12-05")
+    assert simule.urls == []  # tout est déjà relevé : aucun appel
+
+
+def test_rattrapage_refuse_une_liste_d_exclusion_modifiee(tmp_path: Path) -> None:
+    fichier = tmp_path / "exclus.txt"
+    fichier.write_bytes(b"autre-liste.test\n")
+    with pytest.raises(ValueError):
+        collecte.domaines_exclus(fichier)

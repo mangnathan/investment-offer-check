@@ -63,6 +63,10 @@ class SourceNonDeclareeError(ValueError):
     """Source appelée sans plafond ou sans pause déclarés."""
 
 
+class ReseauError(RuntimeError):
+    """Échec de connexion ou de lecture ; le message ne contient jamais de réponse."""
+
+
 @dataclass(frozen=True)
 class Reponse:
     statut: int
@@ -115,6 +119,8 @@ def transport_https(
             if len(corps) > TAILLE_MAX_OCTETS:
                 raise ReponseTropGrosseError(url)
             return Reponse(reponse.status, corps)
+        except (OSError, http.client.HTTPException) as erreur:
+            raise ReseauError(f"{type(erreur).__name__} sur {cible}") from None
         finally:
             connexion.close()
     raise AdresseRefuseeError(f"trop de redirections : {url!r}")

@@ -22,6 +22,7 @@ from investment_offer_check.reseau import (
     RefusDeQuotaError,
     Reponse,
     ReponseTropGrosseError,
+    ReseauError,
     SourceNonDeclareeError,
     transport_https,
     verifier_https,
@@ -299,3 +300,18 @@ def test_redirection_vers_le_domaine_recherche_refusee(connexion: type[Connexion
             "crt", "https://crt.sh/?q=conseil-fictif.test", domaine_recherche="conseil-fictif.test"
         )
     assert len(connexion.creees) == 1
+
+
+def test_erreur_de_connexion_sans_contenu_de_reponse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Coupee(ConnexionSimulee):
+        def getresponse(self) -> ReponseSimulee:
+            raise ConnectionResetError("contenu-qui-ne-doit-pas-sortir")
+
+    ConnexionSimulee.creees = []
+    monkeypatch.setattr(http.client, "HTTPSConnection", Coupee)
+    with pytest.raises(ReseauError) as erreur:
+        transport_https("https://exemple.test/x", {}, 5.0, _tout)
+    assert str(erreur.value) == "ConnectionResetError sur exemple.test"
+    assert erreur.value.__cause__ is None
