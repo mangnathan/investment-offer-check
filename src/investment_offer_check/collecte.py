@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 from collections.abc import Iterable
 from dataclasses import asdict
@@ -62,6 +63,7 @@ EMPREINTE_EXCLUS = "a5584dc36f0062a55eefdaf34edf579adaa865f95dbbdd41a0d3402056ba
 PLAFONDS_QUOTIDIENS = {"datagouv": 3, "iana": 1, "rdap": 30, "crt": 30}
 PAUSES = {"datagouv": 1.0, "iana": 0.0, "rdap": 2.0, "crt": 15.0}
 CODE_ARRET_QUOTA = 2
+TENTATIVES_MAX = 3
 # Réponses qui renseignent sur le domaine et ne sont pas des erreurs techniques.
 STATUTS_RDAP_NORMAUX = frozenset({"trouvé", "absent", "pas de serveur"})
 STATUTS_CRT_NORMAUX = frozenset({"trouvé", "aucun certificat"})
@@ -84,11 +86,34 @@ def dernier_instantane(dossier: Path) -> tuple[dict[str, Any], list[Entree]] | N
     return lire_instantane(fichiers[-1].read_text(encoding="utf-8"))
 
 
-def releves_faits(dossier: Path) -> set[str]:
+def etat_releves(dossier: Path) -> dict[str, tuple[dict[str, Any], int]]:
+    """Dernier relevé de chaque domaine et nombre de tentatives (une ligne par tentative)."""
     chemin = dossier / "releves.jsonl"
-    if not chemin.exists():
-        return set()
-    return {json.loads(ligne)["domaine"] for ligne in chemin.read_text("utf-8").splitlines()}
+    etat: dict[str, tuple[dict[str, Any], int]] = {}
+    if chemin.exists():
+        for texte in chemin.read_text("utf-8").splitlines():
+            ligne = json.loads(texte)
+            precedent = etat.get(ligne["domaine"])
+            etat[ligne["domaine"]] = (ligne, (precedent[1] if precedent else 0) + 1)
+    return etat
+
+
+def a_retenter(statut: str) -> bool:
+    """Seules les erreurs techniques passagères sont retentées : délai, coupure, réponse 5xx.
+
+    Un domaine introuvable, l'absence de serveur RDAP ou de certificat sont des réponses.
+    """
+    return statut.startswith("échec réseau") or re.fullmatch(r"échec 5\d\d", statut) is not None
+
+
+def termines(etat: dict[str, tuple[dict[str, Any], int]]) -> set[str]:
+    """Domaines à ne plus interroger : relevé sans erreur passagère, ou tentatives épuisées."""
+    return {
+        domaine
+        for domaine, (ligne, tentatives) in etat.items()
+        if tentatives >= TENTATIVES_MAX
+        or not (a_retenter(ligne["rdap"]["statut"]) or a_retenter(ligne["crt"]["statut"]))
+    }
 
 
 def a_relever(
@@ -114,18 +139,31 @@ def _sans_exception(appel: Any, *args: Any) -> Any:
         return "redirection refusée"
     except HoteRefuseError:
         return "hôte refusé"
-    except (ReseauError, ReponseTropGrosseError) as erreur:
-        return f"échec réseau ({type(erreur).__name__})"
+    except ReponseTropGrosseError:
+        return "réponse trop grosse"
+    except ReseauError as erreur:
+        return f"échec réseau ({erreur})"
 
 
 def relever_domaines(
-    client: Client, dossier: Path, domaines: list[tuple[str, str]], jour: str
+    client: Client,
+    dossier: Path,
+    domaines: list[tuple[str, str]],
+    jour: str,
+    etat: dict[str, tuple[dict[str, Any], int]] | None = None,
 ) -> dict[str, Any]:
+    """Relève chaque domaine ; lors d'une nouvelle tentative, seule la source en échec est rappelée.
+
+    Un refus de quota ou un plafond arrête avant l'écriture de la ligne : aucune tentative
+    n'est alors consommée.
+    """
+    etat = etat or {}
     compte: dict[str, Any] = {
         "a_relever": len(domaines),
         "releves": 0,
         "erreurs_techniques": 0,
         "rdap_absents": 0,
+        "abandonnes": 0,
         "arret": None,
     }
     if not domaines:
@@ -133,14 +171,22 @@ def relever_domaines(
     try:
         serveurs = lire_amorcage(client)
         for date_inscription, domaine in domaines:
-            rdap = _sans_exception(relever_rdap, client, serveurs, domaine)
-            crt = _sans_exception(relever_crt, client, domaine)
+            precedent, tentatives = etat.get(domaine, (None, 0))
+            if precedent and not a_retenter(precedent["rdap"]["statut"]):
+                rdap = ReleveRdap(**precedent["rdap"])
+            else:
+                rdap = _sans_exception(relever_rdap, client, serveurs, domaine)
+            if precedent and not a_retenter(precedent["crt"]["statut"]):
+                crt = ReleveCrt(**precedent["crt"])
+            else:
+                crt = _sans_exception(relever_crt, client, domaine)
             rdap = rdap if isinstance(rdap, ReleveRdap) else ReleveRdap(rdap)
             crt = crt if isinstance(crt, ReleveCrt) else ReleveCrt(crt)
             ligne = {
                 "domaine": domaine,
                 "date_inscription": date_inscription,
                 "date_releve": jour,
+                "tentative": tentatives + 1,
                 "rdap": asdict(rdap),
                 "crt": asdict(crt),
             }
@@ -153,6 +199,8 @@ def relever_domaines(
                 crt.statut not in STATUTS_CRT_NORMAUX
             )
             compte["rdap_absents"] += int(rdap.statut == "absent")
+            encore = a_retenter(rdap.statut) or a_retenter(crt.statut)
+            compte["abandonnes"] += int(encore and tentatives + 1 >= TENTATIVES_MAX)
     except PlafondAtteintError as erreur:
         compte["arret"] = f"plafond {erreur}"
     except RefusDeQuotaError:
@@ -187,8 +235,9 @@ def quotidienne(dossier: Path, client: Client, jour: str) -> int:
             "retirees": len(retirees),
             "ecart_somme_de_controle": meta.analysis_checksum not in (None, calcul["sha1"]),
         }
-    domaines = a_relever(entrees, releves_faits(dossier), DEBUT_PROSPECTIF)
-    bilan["releves"] = relever_domaines(client, dossier, domaines, jour)
+    etat = etat_releves(dossier)
+    domaines = a_relever(entrees, termines(etat), DEBUT_PROSPECTIF)
+    bilan["releves"] = relever_domaines(client, dossier, domaines, jour, etat)
     bilan["appels"] = dict(client.appels)
     bilan["redirections_refusees"] = dict(client.redirections_refusees)
     _ecrire(dossier / "bilans" / f"{jour}.json", _json(bilan))
@@ -225,9 +274,10 @@ def rattrapage(
     retires = domaines_exclus(exclus)
     entrees = [e for e in lire_csv(liste.read_bytes()).entrees if e.nom not in retires]
     periode = a_relever(entrees, set(), du, au)[:limite]
-    faits = releves_faits(dossier)
+    etat = etat_releves(dossier)
+    faits = termines(etat)
     domaines = [(date, domaine) for date, domaine in periode if domaine not in faits]
-    releves = relever_domaines(client, dossier, domaines, jour)
+    releves = relever_domaines(client, dossier, domaines, jour, etat)
     bilan = {
         "date": jour,
         "periode": [du, au],

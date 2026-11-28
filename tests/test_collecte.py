@@ -13,7 +13,7 @@ import pytest
 from investment_offer_check import collecte
 from investment_offer_check.liste_amf import RESSOURCE, URL_FICHIER, URL_JEU
 from investment_offer_check.releves import URL_AMORCAGE
-from investment_offer_check.reseau import Autorisation, Client, Reponse
+from investment_offer_check.reseau import Autorisation, Client, Reponse, ReseauError
 
 SERVEUR = "https://rdap.registre-fictif.test/v1/"
 PERSONNE = "Jeanne Fictive"
@@ -43,7 +43,7 @@ def _rdap(date: str) -> Reponse:
 
 
 class Simule:
-    def __init__(self, reponses: dict[str, Reponse]) -> None:
+    def __init__(self, reponses: dict[str, Reponse | Exception]) -> None:
         self.reponses = reponses
         self.urls: list[str] = []
 
@@ -51,10 +51,13 @@ class Simule:
         self, url: str, entetes: Mapping[str, str], delai: float, autorise: Autorisation
     ) -> Reponse:
         self.urls.append(url)
-        return self.reponses.get(url, Reponse(404, b""))
+        reponse = self.reponses.get(url, Reponse(404, b""))
+        if isinstance(reponse, Exception):
+            raise reponse
+        return reponse
 
 
-def _reponses(last_modified: str = "2026-12-02T07:30:02+00:00") -> dict[str, Reponse]:
+def _reponses(last_modified: str = "2026-12-02T07:30:02+00:00") -> dict[str, Reponse | Exception]:
     jeu = {
         "resources": [
             {
@@ -67,7 +70,7 @@ def _reponses(last_modified: str = "2026-12-02T07:30:02+00:00") -> dict[str, Rep
         ]
     }
     amorcage = {"services": [[["test"], [SERVEUR]]]}
-    reponses = {
+    reponses: dict[str, Reponse | Exception] = {
         URL_JEU: Reponse(200, json.dumps(jeu).encode()),
         URL_FICHIER: Reponse(200, CSV),
         URL_AMORCAGE: Reponse(200, json.dumps(amorcage).encode()),
@@ -85,7 +88,7 @@ def _reponses(last_modified: str = "2026-12-02T07:30:02+00:00") -> dict[str, Rep
     return reponses
 
 
-def _client(reponses: dict[str, Reponse], rdap: int = 30) -> tuple[Client, Simule]:
+def _client(reponses: dict[str, Reponse | Exception], rdap: int = 30) -> tuple[Client, Simule]:
     simule = Simule(reponses)
     plafonds = collecte.PLAFONDS_QUOTIDIENS | {"rdap": rdap}
     pauses = dict.fromkeys(collecte.PAUSES, 0.0)
@@ -111,6 +114,7 @@ def test_premiere_collecte(tmp_path: Path) -> None:
         "releves": 2,
         "erreurs_techniques": 0,
         "rdap_absents": 0,
+        "abandonnes": 0,
         "arret": None,
     }
     assert URL_FICHIER in simule.urls
@@ -219,7 +223,7 @@ def test_essai_limite_puis_reprise_sans_appel(tmp_path: Path, exclus: Path) -> N
         "nouveau-fictif.test",
     ]
     assert {tuple(sorted(r)) for r in _releves(donnees)} == {
-        ("crt", "date_inscription", "date_releve", "domaine", "rdap")
+        ("crt", "date_inscription", "date_releve", "domaine", "rdap", "tentative")
     }
     assert {tuple(sorted(r["rdap"])) for r in _releves(donnees)} == {
         ("bureau", "creation", "statut")
@@ -232,3 +236,91 @@ def test_essai_limite_puis_reprise_sans_appel(tmp_path: Path, exclus: Path) -> N
     assert simule.urls == []  # même essai relancé : tout est déjà relevé
     bilans = sorted(p.name for p in (donnees / "bilans").iterdir())
     assert bilans == ["rattrapage-2026-12-04-2.json", "rattrapage-2026-12-04.json"]
+
+
+RDAP_NOUVEAU = SERVEUR + "domain/nouveau-fictif.test"
+CRT_NOUVEAU = "https://crt.sh/?q=nouveau-fictif.test&output=json"
+
+
+def _tentatives(tmp_path: Path) -> list[int]:
+    return [r["tentative"] for r in _releves(tmp_path) if r["domaine"] == "nouveau-fictif.test"]
+
+
+def _relancer(tmp_path: Path, jour: str, reponses: dict[str, Reponse | Exception]) -> Simule:
+    client, simule = _client(reponses)
+    collecte.quotidienne(tmp_path, client, jour)
+    return simule
+
+
+@pytest.mark.parametrize(
+    ("url", "panne"),
+    [
+        (RDAP_NOUVEAU, Reponse(502, b"")),  # réponse 5xx
+        (RDAP_NOUVEAU, ReseauError("TimeoutError sur rdap.registre-fictif.test")),  # délai
+        (CRT_NOUVEAU, ReseauError("ConnectionResetError sur crt.sh")),  # connexion coupée
+        (CRT_NOUVEAU, Reponse(503, b"")),
+    ],
+)
+def test_erreur_technique_retentee_sur_la_seule_source_en_echec(
+    tmp_path: Path, url: str, panne: Reponse | Exception
+) -> None:
+    reponses = _reponses()
+    reponses[url] = panne
+    _relancer(tmp_path, "2026-12-02", reponses)
+    simule = _relancer(tmp_path, "2026-12-03", _reponses())
+    autre = CRT_NOUVEAU if url == RDAP_NOUVEAU else RDAP_NOUVEAU
+    assert url in simule.urls and autre not in simule.urls
+    assert _tentatives(tmp_path) == [1, 2]
+    assert _releves(tmp_path)[-1]["rdap"]["statut"] == "trouvé"
+    assert _releves(tmp_path)[-1]["crt"]["statut"] == "trouvé"
+
+
+@pytest.mark.parametrize(
+    ("url", "reponse"),
+    [
+        (RDAP_NOUVEAU, Reponse(404, b"")),  # domaine introuvable
+        (CRT_NOUVEAU, Reponse(200, b"[]")),  # aucun certificat
+        (RDAP_NOUVEAU, Reponse(403, b"")),  # erreur 4xx : pas une panne passagère
+        (RDAP_NOUVEAU, Reponse(200, b"{pas du json")),  # réponse illisible
+    ],
+)
+def test_une_reponse_n_est_jamais_retentee(tmp_path: Path, url: str, reponse: Reponse) -> None:
+    reponses = _reponses()
+    reponses[url] = reponse
+    _relancer(tmp_path, "2026-12-02", reponses)
+    simule = _relancer(tmp_path, "2026-12-03", _reponses("2026-12-03T07:30:02+00:00"))
+    assert RDAP_NOUVEAU not in simule.urls and CRT_NOUVEAU not in simule.urls
+    assert _tentatives(tmp_path) == [1]
+
+
+def test_absence_de_serveur_rdap_jamais_retentee(tmp_path: Path) -> None:
+    csv = CSV + b"sans-serveur-fictif.inconnue;Forex;2026-12-02\n"
+    reponses = _reponses()
+    reponses[URL_FICHIER] = Reponse(200, csv)
+    _relancer(tmp_path, "2026-12-02", reponses)
+    ligne = next(r for r in _releves(tmp_path) if r["domaine"] == "sans-serveur-fictif.inconnue")
+    assert ligne["rdap"]["statut"] == "pas de serveur"
+    simule = _relancer(tmp_path, "2026-12-03", reponses)
+    assert not [u for u in simule.urls if "sans-serveur-fictif" in u]
+
+
+def test_abandon_apres_trois_tentatives(tmp_path: Path) -> None:
+    reponses = _reponses()
+    reponses[CRT_NOUVEAU] = Reponse(502, b"")
+    for jour in ("2026-12-02", "2026-12-03", "2026-12-04"):
+        _relancer(tmp_path, jour, reponses)
+    assert _tentatives(tmp_path) == [1, 2, 3]
+    bilan = json.loads((tmp_path / "bilans" / "2026-12-04.json").read_text("utf-8"))
+    assert bilan["releves"]["abandonnes"] == 1
+    simule = _relancer(tmp_path, "2026-12-05", reponses)
+    assert CRT_NOUVEAU not in simule.urls  # abandonné : valeur manquante, plus d'appel
+    assert _releves(tmp_path)[-1]["crt"]["statut"] == "échec 502"
+
+
+def test_refus_de_quota_ne_consomme_pas_de_tentative(tmp_path: Path) -> None:
+    reponses = _reponses()
+    reponses[CRT_NOUVEAU] = Reponse(429, b"")
+    assert _relancer(tmp_path, "2026-12-02", reponses) is not None
+    assert not (tmp_path / "releves.jsonl").exists()
+    _relancer(tmp_path, "2026-12-03", _reponses())
+    assert _tentatives(tmp_path) == [1]
