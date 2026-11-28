@@ -6,6 +6,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -91,7 +92,7 @@ def _client(reponses: dict[str, Reponse], rdap: int = 30) -> tuple[Client, Simul
     return Client(plafonds=plafonds, pauses=pauses, transport=simule), simule
 
 
-def _releves(dossier: Path) -> list[dict[str, object]]:
+def _releves(dossier: Path) -> list[dict[str, Any]]:
     texte = (dossier / "releves.jsonl").read_text("utf-8")
     return [json.loads(ligne) for ligne in texte.splitlines()]
 
@@ -105,7 +106,13 @@ def test_premiere_collecte(tmp_path: Path) -> None:
     bilan = json.loads((tmp_path / "bilans" / "2026-12-02.json").read_text("utf-8"))
     assert bilan["fichier_inchange"] is False
     assert bilan["ecart_somme_de_controle"] is False
-    assert bilan["releves"] == {"a_relever": 2, "releves": 2, "echecs": 0, "arret": None}
+    assert bilan["releves"] == {
+        "a_relever": 2,
+        "releves": 2,
+        "erreurs_techniques": 0,
+        "rdap_absents": 0,
+        "arret": None,
+    }
     assert URL_FICHIER in simule.urls
 
 
@@ -174,6 +181,7 @@ def test_rattrapage_sans_les_domaines_exclus_et_avec_reprise(tmp_path: Path, exc
         "date",
         "periode",
         "domaines_exclus",
+        "limite",
         "releves",
         "appels",
         "redirections_refusees",
@@ -188,3 +196,39 @@ def test_rattrapage_refuse_une_liste_d_exclusion_modifiee(tmp_path: Path) -> Non
     fichier.write_bytes(b"autre-liste.test\n")
     with pytest.raises(ValueError):
         collecte.domaines_exclus(fichier)
+
+
+def test_bilan_separe_erreurs_techniques_et_domaines_absents(tmp_path: Path) -> None:
+    reponses = _reponses()
+    reponses[SERVEUR + "domain/nouveau-fictif.test"] = Reponse(404, b"")
+    reponses["https://crt.sh/?q=autre-fictif.test&output=json"] = Reponse(502, b"")
+    collecte.quotidienne(tmp_path, _client(reponses)[0], "2026-12-02")
+    bilan = json.loads((tmp_path / "bilans" / "2026-12-02.json").read_text("utf-8"))
+    assert bilan["releves"]["rdap_absents"] == 1
+    assert bilan["releves"]["erreurs_techniques"] == 1
+
+
+def test_essai_limite_puis_reprise_sans_appel(tmp_path: Path, exclus: Path) -> None:
+    liste = tmp_path / "liste.csv"
+    liste.write_bytes(CSV)
+    donnees = tmp_path / "donnees"
+    client, _ = _client(_reponses())
+    collecte.rattrapage(donnees, client, liste, exclus, "2026-01-01", "2026-12-31", "2026-12-04", 2)
+    assert [r["domaine"] for r in _releves(donnees)] == [
+        "ancien-fictif.test",
+        "nouveau-fictif.test",
+    ]
+    assert {tuple(sorted(r)) for r in _releves(donnees)} == {
+        ("crt", "date_inscription", "date_releve", "domaine", "rdap")
+    }
+    assert {tuple(sorted(r["rdap"])) for r in _releves(donnees)} == {
+        ("bureau", "creation", "statut")
+    }
+    assert {tuple(sorted(r["crt"])) for r in _releves(donnees)} == {
+        ("emetteur", "premier", "statut")
+    }
+    client, simule = _client(_reponses())
+    collecte.rattrapage(donnees, client, liste, exclus, "2026-01-01", "2026-12-31", "2026-12-04", 2)
+    assert simule.urls == []  # même essai relancé : tout est déjà relevé
+    bilans = sorted(p.name for p in (donnees / "bilans").iterdir())
+    assert bilans == ["rattrapage-2026-12-04-2.json", "rattrapage-2026-12-04.json"]

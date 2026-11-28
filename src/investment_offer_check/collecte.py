@@ -9,7 +9,9 @@ Dossier de données (le dépôt privé de la collecte) :
 La collecte quotidienne relève les domaines inscrits à partir de DEBUT_PROSPECTIF, le lendemain
 de la fermeture du test rétrospectif. Le rattrapage relève une seule fois les domaines du test
 rétrospectif, moins les 20 domaines de la mesure de faisabilité, et ne calcule aucune
-statistique sur eux : seulement le nombre d'appels, de relevés et d'échecs.
+statistique sur eux. Son bilan ne donne que le nombre d'appels, de relevés et d'erreurs
+techniques, et un seul chiffre sur les domaines eux-mêmes, pour contrôler le rattrapage : le
+nombre de domaines introuvables en RDAP.
 """
 
 from __future__ import annotations
@@ -60,6 +62,9 @@ EMPREINTE_EXCLUS = "a5584dc36f0062a55eefdaf34edf579adaa865f95dbbdd41a0d3402056ba
 PLAFONDS_QUOTIDIENS = {"datagouv": 3, "iana": 1, "rdap": 30, "crt": 30}
 PAUSES = {"datagouv": 1.0, "iana": 0.0, "rdap": 2.0, "crt": 15.0}
 CODE_ARRET_QUOTA = 2
+# Réponses qui renseignent sur le domaine et ne sont pas des erreurs techniques.
+STATUTS_RDAP_NORMAUX = frozenset({"trouvé", "absent", "pas de serveur"})
+STATUTS_CRT_NORMAUX = frozenset({"trouvé", "aucun certificat"})
 
 
 def _ecrire(chemin: Path, texte: str) -> None:
@@ -116,7 +121,13 @@ def _sans_exception(appel: Any, *args: Any) -> Any:
 def relever_domaines(
     client: Client, dossier: Path, domaines: list[tuple[str, str]], jour: str
 ) -> dict[str, Any]:
-    compte: dict[str, Any] = {"a_relever": len(domaines), "releves": 0, "echecs": 0, "arret": None}
+    compte: dict[str, Any] = {
+        "a_relever": len(domaines),
+        "releves": 0,
+        "erreurs_techniques": 0,
+        "rdap_absents": 0,
+        "arret": None,
+    }
     if not domaines:
         return compte
     try:
@@ -138,7 +149,10 @@ def relever_domaines(
             with chemin.open("a", encoding="utf-8", newline="\n") as f:
                 f.write(json.dumps(ligne, ensure_ascii=False, sort_keys=True) + "\n")
             compte["releves"] += 1
-            compte["echecs"] += int(rdap.statut != "trouvé") + int(crt.statut != "trouvé")
+            compte["erreurs_techniques"] += int(rdap.statut not in STATUTS_RDAP_NORMAUX) + int(
+                crt.statut not in STATUTS_CRT_NORMAUX
+            )
+            compte["rdap_absents"] += int(rdap.statut == "absent")
     except PlafondAtteintError as erreur:
         compte["arret"] = f"plafond {erreur}"
     except RefusDeQuotaError:
@@ -189,22 +203,41 @@ def domaines_exclus(fichier: Path) -> set[str]:
     return {identifier(ligne).nom for ligne in contenu.decode("utf-8").split()}
 
 
+def _bilan_libre(dossier: Path, nom: str) -> Path:
+    """Chemin de bilan qui n'écrase pas celui d'une exécution précédente du même jour."""
+    chemin, rang = dossier / "bilans" / f"{nom}.json", 2
+    while chemin.exists():
+        chemin, rang = dossier / "bilans" / f"{nom}-{rang}.json", rang + 1
+    return chemin
+
+
 def rattrapage(
-    dossier: Path, client: Client, liste: Path, exclus: Path, du: str, au: str, jour: str
+    dossier: Path,
+    client: Client,
+    liste: Path,
+    exclus: Path,
+    du: str,
+    au: str,
+    jour: str,
+    limite: int | None = None,
 ) -> int:
+    """Relevé unique ; avec limite, seulement les N premiers domaines de la période (essai)."""
     retires = domaines_exclus(exclus)
     entrees = [e for e in lire_csv(liste.read_bytes()).entrees if e.nom not in retires]
-    domaines = a_relever(entrees, releves_faits(dossier), du, au)
+    periode = a_relever(entrees, set(), du, au)[:limite]
+    faits = releves_faits(dossier)
+    domaines = [(date, domaine) for date, domaine in periode if domaine not in faits]
     releves = relever_domaines(client, dossier, domaines, jour)
     bilan = {
         "date": jour,
         "periode": [du, au],
         "domaines_exclus": len(retires),
+        "limite": limite,
         "releves": releves,
         "appels": dict(client.appels),
         "redirections_refusees": dict(client.redirections_refusees),
     }
-    _ecrire(dossier / "bilans" / f"rattrapage-{jour}.json", _json(bilan))
+    _ecrire(_bilan_libre(dossier, f"rattrapage-{jour}"), _json(bilan))
     print(_json(bilan), end="")
     return CODE_ARRET_QUOTA if releves["arret"] == "refus de quota" else 0
 
@@ -223,6 +256,7 @@ def main(arguments: list[str] | None = None) -> int:
     r.add_argument("--du", default="2026-01-01")
     r.add_argument("--au", default="2026-11-27")
     r.add_argument("--plafond", type=int, default=300, help="appels RDAP et crt.sh au plus")
+    r.add_argument("--limite", type=int, help="essai : seulement les N premiers domaines")
     args = analyse.parse_args(arguments)
     jour = datetime.now(UTC).date().isoformat()
     if args.commande == "quotidienne":
@@ -230,7 +264,9 @@ def main(arguments: list[str] | None = None) -> int:
         return quotidienne(args.donnees, client, jour)
     plafonds = {"iana": 1, "rdap": args.plafond, "crt": args.plafond}
     client = Client(plafonds=plafonds, pauses=PAUSES)
-    return rattrapage(args.donnees, client, args.liste, args.exclus, args.du, args.au, jour)
+    return rattrapage(
+        args.donnees, client, args.liste, args.exclus, args.du, args.au, jour, args.limite
+    )
 
 
 if __name__ == "__main__":
